@@ -119,8 +119,12 @@ impl VoiceConnection {
                                 connection_lock.speaking().await.unwrap();
                                 let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Voip).unwrap();
                                 for data in pcm_samples.chunks(1920) {
+                                    let mut inputs = [0i16; 1920];
+                                    inputs[0..data.len()].copy_from_slice(data);
                                     let mut output = [0u8; 1275];
-                                    let size = encoder.encode(data, &mut output).unwrap();
+                                    println!("Encoding audio: {:?}", inputs.len());
+                                    let size = encoder.encode(&inputs, &mut output).unwrap();
+                                    println!("Sending audio: {:?}", &output[0..size]);
                                     connection_lock.send_audio(&output[0..size]).await.unwrap();
                                 };
                             }
@@ -129,6 +133,11 @@ impl VoiceConnection {
                 }
             }
         });
+        Ok(())
+    }
+
+    fn play<'a>(&'a self, data: Vec<u8>) -> anyhow::Result<()> {
+        self.tx.send(VoiceCommand::Play(data))?;
         Ok(())
     }
 }

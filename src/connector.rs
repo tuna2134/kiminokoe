@@ -155,9 +155,9 @@ impl BaseConnection {
             .unwrap()
             .encrypt_in_place(GenericArray::from_slice(&nonce), &[], &mut data)
             .unwrap();
-        let mut encrypted = [0u8; 275 + 24 + 12 + 24 + 16 + 12];
+        let mut encrypted = [0u8; 1275 + 24 + 12 + 24 + 16 + 12];
         encrypted[0..12].copy_from_slice(&buffer[0..12]);
-        encrypted[12..data.len()].copy_from_slice(&data);
+        encrypted[12..12 + data.len()].copy_from_slice(&data);
         self.socket.send(&encrypted).await?;
         self.timestamp += 1920;
         Ok(())

@@ -32,3 +32,6 @@ class VoiceClient(discord.VoiceProtocol):
     async def on_voice_state_update(self, data):
         self._connector.session_id = data.get("session_id")
         self._wait_voice_state.set()
+
+    def play(self, source):
+        self._connection.play(source)
