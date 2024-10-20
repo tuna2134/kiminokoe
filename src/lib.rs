@@ -34,16 +34,21 @@ impl VoiceConnector {
     }
 
     fn connect<'a>(&'a self, py: Python<'a>) -> anyhow::Result<Bound<'a, PyAny>> {
-        let connection = Arc::new(Mutex::new(connector::BaseConnection::new(
-            self.endpoint.clone(),
-            self.guild_id,
-            self.session_id.clone(),
-            self.token.clone(),
-            self.user_id,
-        )));
+        let endpoint = self.endpoint.clone();
+        let guild_id = self.guild_id;
+        let session_id = self.session_id.clone();
+        let token = self.token.clone();
+        let user_id = self.user_id;
         Ok(pyo3_async_runtimes::tokio::future_into_py(
             py,
             async move {
+                let connection = Arc::new(Mutex::new(connector::BaseConnection::new(
+                    endpoint,
+                    guild_id,
+                    session_id,
+                    token,
+                    user_id,
+                ).await?));
                 let mut connection_lock = connection.lock().await;
                 connection_lock.connect().await?;
                 connection_lock.pull().await?;

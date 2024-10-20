@@ -1,13 +1,18 @@
 use serenity_voice_model::{
     id::{GuildId, UserId},
-    payload::{Heartbeat, Identify},
-    Event,
+    payload::{Heartbeat, Identify, SelectProtocol},
+    Event, ProtocolData,
 };
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio_native_tls::{native_tls, TlsConnector, TlsStream};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use futures_util::{SinkExt, StreamExt};
+
+pub struct IPDiscovery {
+    pub ip: String,
+    pub port: u16,
+}
 
 pub struct BaseConnection {
     endpoint: String,
@@ -17,17 +22,20 @@ pub struct BaseConnection {
     user_id: u64,
     ws_stream: Option<WebSocketStream<TlsStream<TcpStream>>>,
     pub heartbeat_interval: f64,
+    pub socket: UdpSocket,
+    ssrc: u32,
 }
 
 impl BaseConnection {
-    pub fn new(
+    pub async fn new(
         endpoint: String,
         server_id: u64,
         session_id: String,
         token: String,
         user_id: u64,
-    ) -> Self {
-        BaseConnection {
+    ) -> anyhow::Result<Self> {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        Ok(BaseConnection {
             endpoint,
             server_id,
             session_id,
@@ -35,7 +43,9 @@ impl BaseConnection {
             user_id,
             ws_stream: None,
             heartbeat_interval: 1.0,
-        }
+            socket,
+            ssrc: 0,
+        })
     }
 
     pub async fn connect(&mut self) -> anyhow::Result<()> {
@@ -75,6 +85,10 @@ impl BaseConnection {
             }
             Event::Ready(ready) => {
                 println!("Ready: {:?}", ready);
+                self.socket.connect((ready.ip, ready.port)).await?;
+                self.ssrc = ready.ssrc;
+                let (ip, port) = self.ip_discovery().await?;
+                println!("IP Discovery: {}:{}", ip, port);
             }
             _ => {
                 println!("Unhandled event: {:?}", event);
@@ -83,13 +97,33 @@ impl BaseConnection {
         Ok(())
     }
 
+    pub async fn ip_discovery(&self) -> anyhow::Result<(String, u16)> {
+        let mut buffer = [0u8; 8];
+        /// Give 0x1 to request the IP discovery
+        buffer[0..2].copy_from_slice(&0x1u16.to_be_bytes());
+        buffer[2..4].copy_from_slice(&(70 as u16).to_be_bytes());
+        buffer[4..8].copy_from_slice(&self.ssrc.to_be_bytes());
+        self.socket.send(&buffer).await?;
+
+        let (ip, port) = loop {
+            let mut buffer = [0u8; 74];
+            let n = self.socket.recv(&mut buffer).await?;
+            if n != 74 {
+                continue;
+            }
+            let ip = String::from_utf8_lossy(&buffer[8..72]);
+            let port = u16::from_be_bytes([buffer[72], buffer[73]]);
+            break (ip.to_string(), port);
+        };
+        Ok((ip, port))
+    }
+
     pub async fn send_heartbeat(&mut self) -> anyhow::Result<()> {
         // Get unix epoch time
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis();
         let payload = Event::Heartbeat(Heartbeat { nonce: now as u64 });
-        println!("{:?}", serde_json::to_string(&payload)?);
         let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
         write
             .send(Message::Text(serde_json::to_string(&payload)?))
