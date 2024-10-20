@@ -9,11 +9,6 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use futures_util::{SinkExt, StreamExt};
 
-pub struct IPDiscovery {
-    pub ip: String,
-    pub port: u16,
-}
-
 pub struct BaseConnection {
     endpoint: String,
     server_id: u64,
@@ -99,7 +94,7 @@ impl BaseConnection {
 
     pub async fn ip_discovery(&self) -> anyhow::Result<(String, u16)> {
         let mut buffer = [0u8; 8];
-        /// Give 0x1 to request the IP discovery
+        // Give 0x1 to request the IP discovery
         buffer[0..2].copy_from_slice(&0x1u16.to_be_bytes());
         buffer[2..4].copy_from_slice(&(70 as u16).to_be_bytes());
         buffer[4..8].copy_from_slice(&self.ssrc.to_be_bytes());
