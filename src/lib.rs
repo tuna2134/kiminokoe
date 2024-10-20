@@ -1,8 +1,8 @@
 use connector::BaseConnection;
 use pyo3::prelude::*;
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Mutex, time::Instant};
 
 mod connector;
 
@@ -48,9 +48,7 @@ impl VoiceConnector {
                 connection_lock.connect().await?;
                 connection_lock.pull().await?;
                 // let (tx, rx) = tokio::sync::oneshot::channel::<Event>();
-                Ok(VoiceConnection {
-                    connection: Arc::clone(&connection),
-                })
+                Ok(VoiceConnection::new(Arc::clone(&connection)))
             },
         )?)
     }
@@ -61,14 +59,36 @@ struct VoiceConnection {
     connection: Arc<Mutex<BaseConnection>>,
 }
 
+impl VoiceConnection {
+    pub fn new(connection: Arc<Mutex<BaseConnection>>) -> Self {
+        VoiceConnection { connection }
+    }
+}
+
 #[pymethods]
 impl VoiceConnection {
     fn run<'a>(&'a self) -> anyhow::Result<()> {
         let connection = self.connection.clone();
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.spawn(async move {
-            let mut connection_lock = connection.lock().await;
-            connection_lock.pull().await.unwrap();
+            let mut next_heartbeat = {
+                let connection_lock = connection.lock().await;
+                Instant::now() + Duration::from_secs_f64(connection_lock.heartbeat_interval / 1000.0)
+            };
+            loop {
+                let hb = tokio::time::sleep_until(next_heartbeat);
+                tokio::select! {
+                    _ = hb => {
+                        let mut connection_lock = connection.lock().await;
+                        connection_lock.send_heartbeat().await.unwrap();
+                        next_heartbeat = Instant::now() + Duration::from_secs_f64(connection_lock.heartbeat_interval / 1000.0);
+                    }
+                    _ = async {
+                        let mut connection_lock = connection.lock().await;
+                        connection_lock.pull().await
+                    } => {}
+                }
+            }
         });
         Ok(())
     }

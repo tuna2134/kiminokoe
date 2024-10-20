@@ -16,6 +16,7 @@ pub struct BaseConnection {
     token: String,
     user_id: u64,
     ws_stream: Option<WebSocketStream<TlsStream<TcpStream>>>,
+    pub heartbeat_interval: f64,
 }
 
 impl BaseConnection {
@@ -33,6 +34,7 @@ impl BaseConnection {
             token,
             user_id,
             ws_stream: None,
+            heartbeat_interval: 1.0,
         }
     }
 
@@ -41,9 +43,8 @@ impl BaseConnection {
             let stream = TcpStream::connect((self.endpoint.as_str(), 443)).await?;
             let connector = TlsConnector::from(native_tls::TlsConnector::new()?);
             let stream = connector.connect(&self.endpoint, stream).await?;
-            tokio_tungstenite::client_async(format!("wss://{}/?v=8", self.endpoint), stream).await?
+            tokio_tungstenite::client_async(format!("wss://{}/?v=4", self.endpoint), stream).await?
         };
-        println!("Connected");
         self.ws_stream.replace(ws_stream);
         Ok(())
     }
@@ -61,24 +62,34 @@ impl BaseConnection {
         let event: Event = serde_json::from_str(&msg)?;
         match event {
             Event::Hello(hello) => {
-                println!("Hello: {:?}", hello);
                 self.identify().await?;
-                println!("hmm");
+                self.send_heartbeat().await?;
+                self.heartbeat_interval = hello.heartbeat_interval;
             }
             Event::Heartbeat(_) => {
-                self.send_heartbeat().await?;
                 println!("Sent heartbeat");
+                self.send_heartbeat().await?;
+            }
+            Event::HeartbeatAck(ack) => {
+                println!("Ack: {:?}", ack);
             }
             Event::Ready(ready) => {
                 println!("Ready: {:?}", ready);
             }
-            _ => {}
+            _ => {
+                println!("Unhandled event: {:?}", event);
+            }
         }
         Ok(())
     }
 
-    async fn send_heartbeat(&mut self) -> anyhow::Result<()> {
-        let payload = Event::Heartbeat(Heartbeat { nonce: 0 });
+    pub async fn send_heartbeat(&mut self) -> anyhow::Result<()> {
+        // Get unix epoch time
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis();
+        let payload = Event::Heartbeat(Heartbeat { nonce: now as u64 });
+        println!("{:?}", serde_json::to_string(&payload)?);
         let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
         write
             .send(Message::Text(serde_json::to_string(&payload)?))
