@@ -1,8 +1,10 @@
 use connector::BaseConnection;
 use pyo3::prelude::*;
+use serenity_voice_model::Event;
 
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
+use flume::{Receiver, Sender};
 
 mod connector;
 
@@ -62,11 +64,14 @@ impl VoiceConnector {
 #[pyclass]
 struct VoiceConnection {
     connection: Arc<Mutex<BaseConnection>>,
+    rx: Arc<Receiver<Event>>,
+    tx: Sender<Event>,
 }
 
 impl VoiceConnection {
     pub fn new(connection: Arc<Mutex<BaseConnection>>) -> Self {
-        VoiceConnection { connection }
+        let (tx, rx) = flume::unbounded();
+        VoiceConnection { connection, rx: Arc::new(rx), tx }
     }
 }
 
@@ -75,10 +80,11 @@ impl VoiceConnection {
     fn run<'a>(&'a self) -> anyhow::Result<()> {
         let connection = self.connection.clone();
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        let rx = self.rx.clone();
         runtime.spawn(async move {
             let mut next_heartbeat = {
                 let connection_lock = connection.lock().await;
-                Instant::now() + Duration::from_secs_f64(connection_lock.heartbeat_interval / 1000.0)
+                Instant::now() + Duration::from_secs_f64((connection_lock.heartbeat_interval) / 1000.0)
             };
             loop {
                 let hb = tokio::time::sleep_until(next_heartbeat);
@@ -90,8 +96,14 @@ impl VoiceConnection {
                     }
                     _ = async {
                         let mut connection_lock = connection.lock().await;
-                        connection_lock.pull().await
+                        if let Err(e) = connection_lock.pull().await {
+                            eprintln!("Error: {}", e);
+                        }
                     } => {}
+                    event = rx.recv_async() => {
+                        let mut connection_lock = connection.lock().await;
+                        connection_lock.send_event(event.unwrap()).await.unwrap();
+                    }
                 }
             }
         });

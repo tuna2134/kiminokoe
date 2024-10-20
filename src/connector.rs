@@ -1,3 +1,6 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
+
 use serenity_voice_model::{
     id::{GuildId, UserId},
     payload::{Heartbeat, Identify, SelectProtocol},
@@ -79,12 +82,12 @@ impl BaseConnection {
                 println!("Ack: {:?}", ack);
             }
             Event::Ready(ready) => {
-                println!("Ready: {:?}", ready);
                 self.socket.connect((ready.ip, ready.port)).await?;
                 self.ssrc = ready.ssrc;
                 let (ip, port) = self.ip_discovery().await?;
-                println!("IP Discovery: {}:{}", ip, port);
+                println!("Now selecting protocol");
                 self.select_protocol(ip, port).await?;
+                println!("Selected protocol");
             }
             _ => {
                 println!("Unhandled event: {:?}", event);
@@ -114,15 +117,26 @@ impl BaseConnection {
         Ok((ip, port))
     }
 
+    pub async fn send_event(&mut self, event: Event) -> anyhow::Result<()> {
+        let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
+        write
+            .send(Message::Text(serde_json::to_string(&event)?))
+            .await?;
+        Ok(())
+    }
+
     async fn select_protocol(&mut self, ip: String, port: u16) -> anyhow::Result<()> {
+        println!("{:?}, {}", ip, port);
+        let ipaddr: IpAddr = Ipv4Addr::from_str(&ip)?.into();
         let payload = Event::SelectProtocol(SelectProtocol {
             protocol: "udp".to_string(),
             data: ProtocolData {
-                address: ip.parse()?,
+                address: ipaddr,
                 port: port,
                 mode: "xsalsa20_poly1305".to_string(),
             },
         });
+        println!("Sending select protocol");
         let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
         write
             .send(Message::Text(serde_json::to_string(&payload)?))
