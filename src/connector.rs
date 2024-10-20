@@ -84,6 +84,7 @@ impl BaseConnection {
                 self.ssrc = ready.ssrc;
                 let (ip, port) = self.ip_discovery().await?;
                 println!("IP Discovery: {}:{}", ip, port);
+                self.select_protocol(ip, port).await?;
             }
             _ => {
                 println!("Unhandled event: {:?}", event);
@@ -92,8 +93,8 @@ impl BaseConnection {
         Ok(())
     }
 
-    pub async fn ip_discovery(&self) -> anyhow::Result<(String, u16)> {
-        let mut buffer = [0u8; 8];
+    async fn ip_discovery(&self) -> anyhow::Result<(String, u16)> {
+        let mut buffer = [0u8; 74];
         // Give 0x1 to request the IP discovery
         buffer[0..2].copy_from_slice(&0x1u16.to_be_bytes());
         buffer[2..4].copy_from_slice(&(70 as u16).to_be_bytes());
@@ -111,6 +112,22 @@ impl BaseConnection {
             break (ip.to_string(), port);
         };
         Ok((ip, port))
+    }
+
+    async fn select_protocol(&mut self, ip: String, port: u16) -> anyhow::Result<()> {
+        let payload = Event::SelectProtocol(SelectProtocol {
+            protocol: "udp".to_string(),
+            data: ProtocolData {
+                address: ip.parse()?,
+                port: port,
+                mode: "xsalsa20_poly1305".to_string(),
+            },
+        });
+        let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
+        write
+            .send(Message::Text(serde_json::to_string(&payload)?))
+            .await?;
+        Ok(())
     }
 
     pub async fn send_heartbeat(&mut self) -> anyhow::Result<()> {
