@@ -1,6 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
+use crypto_secretbox::aead::generic_array::GenericArray;
+use crypto_secretbox::aead::{Aead, AeadMutInPlace, Buffer};
+use crypto_secretbox::{Key, KeyInit, XSalsa20Poly1305};
+use serenity_voice_model::payload::Speaking;
+use serenity_voice_model::SpeakingState;
 use serenity_voice_model::{
     id::{GuildId, UserId},
     payload::{Heartbeat, Identify, SelectProtocol},
@@ -22,6 +27,9 @@ pub struct BaseConnection {
     pub heartbeat_interval: f64,
     pub socket: UdpSocket,
     ssrc: u32,
+    crypto: Option<XSalsa20Poly1305>,
+    sequence: u16,
+    timestamp: u32,
 }
 
 impl BaseConnection {
@@ -43,6 +51,9 @@ impl BaseConnection {
             heartbeat_interval: 1.0,
             socket,
             ssrc: 0,
+            crypto: None,
+            sequence: 0,
+            timestamp: 0,
         })
     }
 
@@ -85,9 +96,11 @@ impl BaseConnection {
                 self.socket.connect((ready.ip, ready.port)).await?;
                 self.ssrc = ready.ssrc;
                 let (ip, port) = self.ip_discovery().await?;
-                println!("Now selecting protocol");
                 self.select_protocol(ip, port).await?;
-                println!("Selected protocol");
+            }
+            Event::SessionDescription(session_description) => {
+                let key = Key::from_slice(&session_description.secret_key);
+                self.crypto.replace(XSalsa20Poly1305::new(key));
             }
             _ => {
                 println!("Unhandled event: {:?}", event);
@@ -110,11 +123,58 @@ impl BaseConnection {
             if n != 74 {
                 continue;
             }
-            let ip = String::from_utf8_lossy(&buffer[8..72]);
+            let ip_start: usize = 8;
+            let ip = if let Some(ip_end) = buffer[ip_start..].iter().position(|&x| x == 0) {
+                let ip = std::str::from_utf8(&buffer[ip_start..ip_start + ip_end])
+                    .expect("Failed to decode IP")
+                    .to_string();
+                ip
+            } else {
+                continue;
+            };
             let port = u16::from_be_bytes([buffer[72], buffer[73]]);
             break (ip.to_string(), port);
         };
         Ok((ip, port))
+    }
+
+    pub async fn send_audio(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        // 1920ずつに分割
+        self.sequence += 1;
+        let mut buffer = [0u8; 12];
+        buffer[0..1].copy_from_slice(&0x80u8.to_be_bytes());
+        buffer[1..2].copy_from_slice(&0x78u8.to_be_bytes());
+        buffer[2..4].copy_from_slice(&self.sequence.to_be_bytes());
+        buffer[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
+        buffer[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
+        let mut nonce = vec![0u8; 24];
+        nonce[0..12].copy_from_slice(&buffer[0..12]);
+        let mut data = data.to_vec();
+        self.crypto
+            .as_mut()
+            .unwrap()
+            .encrypt_in_place(GenericArray::from_slice(&nonce), &[], &mut data)
+            .unwrap();
+        let mut encrypted = [0u8; 275 + 24 + 12 + 24 + 16 + 12];
+        encrypted[0..12].copy_from_slice(&buffer[0..12]);
+        encrypted[12..data.len()].copy_from_slice(&data);
+        self.socket.send(&encrypted).await?;
+        self.timestamp += 1920;
+        Ok(())
+    }
+
+    pub async fn speaking(&mut self) -> anyhow::Result<()> {
+        let payload = Event::Speaking(Speaking {
+            speaking: SpeakingState::PRIORITY,
+            delay: None,
+            ssrc: self.ssrc,
+            user_id: None,
+        });
+        let (mut write, _) = self.ws_stream.as_mut().unwrap().split();
+        write
+            .send(Message::Text(serde_json::to_string(&payload)?))
+            .await?;
+        Ok(())
     }
 
     pub async fn send_event(&mut self, event: Event) -> anyhow::Result<()> {
@@ -126,7 +186,6 @@ impl BaseConnection {
     }
 
     async fn select_protocol(&mut self, ip: String, port: u16) -> anyhow::Result<()> {
-        println!("{:?}, {}", ip, port);
         let ipaddr: IpAddr = Ipv4Addr::from_str(&ip)?.into();
         let payload = Event::SelectProtocol(SelectProtocol {
             protocol: "udp".to_string(),

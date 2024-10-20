@@ -1,12 +1,15 @@
 use connector::BaseConnection;
 use pyo3::prelude::*;
-use serenity_voice_model::Event;
 
+use audiopus::{coder::Encoder, Application, Channels, SampleRate};
+use flume::{Receiver, Sender};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
-use flume::{Receiver, Sender};
 
+mod command;
 mod connector;
+
+use command::Command as VoiceCommand;
 
 #[pyclass]
 struct VoiceConnector {
@@ -44,13 +47,10 @@ impl VoiceConnector {
         Ok(pyo3_async_runtimes::tokio::future_into_py(
             py,
             async move {
-                let connection = Arc::new(Mutex::new(connector::BaseConnection::new(
-                    endpoint,
-                    guild_id,
-                    session_id,
-                    token,
-                    user_id,
-                ).await?));
+                let connection = Arc::new(Mutex::new(
+                    connector::BaseConnection::new(endpoint, guild_id, session_id, token, user_id)
+                        .await?,
+                ));
                 let mut connection_lock = connection.lock().await;
                 connection_lock.connect().await?;
                 connection_lock.pull().await?;
@@ -64,14 +64,18 @@ impl VoiceConnector {
 #[pyclass]
 struct VoiceConnection {
     connection: Arc<Mutex<BaseConnection>>,
-    rx: Arc<Receiver<Event>>,
-    tx: Sender<Event>,
+    rx: Arc<Receiver<VoiceCommand>>,
+    tx: Sender<VoiceCommand>,
 }
 
 impl VoiceConnection {
     pub fn new(connection: Arc<Mutex<BaseConnection>>) -> Self {
         let (tx, rx) = flume::unbounded();
-        VoiceConnection { connection, rx: Arc::new(rx), tx }
+        VoiceConnection {
+            connection,
+            rx: Arc::new(rx),
+            tx,
+        }
     }
 }
 
@@ -100,9 +104,27 @@ impl VoiceConnection {
                             eprintln!("Error: {}", e);
                         }
                     } => {}
-                    event = rx.recv_async() => {
-                        let mut connection_lock = connection.lock().await;
-                        connection_lock.send_event(event.unwrap()).await.unwrap();
+                    cmd = rx.recv_async() => {
+                        let cmd = cmd.unwrap();
+                        match cmd {
+                            VoiceCommand::Play(data) => {
+                                let pcm_samples: &[i16] = unsafe {
+                                    assert!(data.len() % 2 == 0);
+                                    std::slice::from_raw_parts(
+                                        data.as_ptr() as *const i16,
+                                        data.len() / 2
+                                    )
+                                };
+                                let mut connection_lock = connection.lock().await;
+                                connection_lock.speaking().await.unwrap();
+                                let encoder = Encoder::new(SampleRate::Hz48000, Channels::Stereo, Application::Voip).unwrap();
+                                for data in pcm_samples.chunks(1920) {
+                                    let mut output = [0u8; 1275];
+                                    let size = encoder.encode(data, &mut output).unwrap();
+                                    connection_lock.send_audio(&output[0..size]).await.unwrap();
+                                };
+                            }
+                        }
                     }
                 }
             }
